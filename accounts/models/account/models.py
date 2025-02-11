@@ -14,7 +14,6 @@ from django.core.validators import RegexValidator
 from django.db import models, IntegrityError
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from rest_framework.authtoken.models import Token
 
 from common_core.models import IdentityBase, AuditBase, SoftDeleteBase
 from common_core.models.meta import MetaBase
