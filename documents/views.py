@@ -1,7 +1,8 @@
-from django.core.exceptions import PermissionDenied
+import json
 import json
 import os
 
+from PIL import Image
 from django.conf import settings
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core.exceptions import PermissionDenied
@@ -15,20 +16,18 @@ from django.views.generic import ListView
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
 from pikepdf import Pdf
+from pyhanko.pdf_utils.images import PdfImage
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign import signers
+from pyhanko.sign.fields import SigFieldSpec, append_signature_field
 from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
-from pyhanko.sign.fields import enumerate_sig_fields, SigFieldSpec, append_signature_field
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 
 from accounts.models import Account
 from signatures.utils import get_user_signature_path
 from .forms import DocumentUploadForm
 from .models import Document, SignatureField
 from .utils import remove_hybrid_xrefs
-
-from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, DictionaryObject, ArrayObject, NumberObject  # ✅ Fix for DictionaryObject
-from PIL import Image
 
 
 class UploadDocumentView(LoginRequiredMixin, FormView):
@@ -125,11 +124,6 @@ class AssignSignaturesView(LoginRequiredMixin, TemplateView):
 
 
 class SaveSignaturesView(LoginRequiredMixin, View):
-    """
-    Saves the signature locations for a document and assigns them to users.
-    Also ensures that the PDF has the necessary AcroForm fields.
-    """
-
     def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
         try:
@@ -145,68 +139,57 @@ class SaveSignaturesView(LoginRequiredMixin, View):
         pdf_path = document.file.path
         temp_pdf_path = os.path.join(settings.MEDIA_ROOT, f"temp_{document.file.name}")
 
+        temp_dir = os.path.dirname(temp_pdf_path)  # Extract directory part of the path
+        os.makedirs(temp_dir, exist_ok=True)  # Create it, including parents
+
         with open(pdf_path, "rb") as pdf_in:
             writer = IncrementalPdfFileWriter(pdf_in)
 
-            # Ensure PDF has an AcroForm
-            root = writer.root
-            if "/AcroForm" not in root:
-                acroform_dict = DictionaryObject({
-                    NameObject("/Fields"): writer.add_object(ArrayObject([]))
-                })
-                root[NameObject("/AcroForm")] = writer.add_object(acroform_dict)
-
-            acro_form = root["/AcroForm"]
-
-            # Ensure AcroForm has a "/Fields" array
-            if "/Fields" not in acro_form:
-                acro_form[NameObject("/Fields")] = writer.add_object(ArrayObject([]))
-
             for field in fields:
                 user_id = field.get("assigned_user_id")
-                x, y, page = field.get("x"), field.get("y"), field.get("page")
+                x, y, width, height, page = field.get("x"), field.get("y"), field.get("width"), field.get(
+                    "height"), field.get("page")
 
-                if user_id is None or x is None or y is None or page is None:
-                    continue  # Skip invalid field entries
+                if user_id is None or x is None or y is None or page is None or width is None or height is None:
+                    continue
 
                 assigned_user = get_object_or_404(Account, pk=user_id)
-
-                # Generate a unique field name
                 field_name = f"Signature_{document.id}_{assigned_user.id}_{x}_{y}_{page}"
 
-                # Create or update signature field in the database
                 signature_field, created = SignatureField.objects.update_or_create(
                     document=document,
                     assigned_user=assigned_user,
                     x=x,
                     y=y,
                     page=page,
+                    width=width,
+                    height=height,
                     defaults={"signed": False, "field_name": field_name},
                 )
 
-                # Add signature field to the PDF
                 spec = SigFieldSpec(
                     sig_field_name=field_name,
-                    on_page=page - 1,  # PyHanko uses 0-based indexing
-                    box=(x, y, x + 100, y + 50)
+                    on_page=page - 1,  # Important: 0-based page index
+                    box=(x, y, x + width, y + height)
                 )
-                append_signature_field(writer, spec)
+
+                append_signature_field(writer, spec)  # Use the imported function
 
                 saved_fields.append({
                     "id": signature_field.id,
                     "user": assigned_user.username,
                     "x": signature_field.x,
                     "y": signature_field.y,
+                    "width": signature_field.width,
+                    "height": signature_field.height,
                     "page": signature_field.page,
                     "field_name": field_name,
                     "created": created,
                 })
 
-            # Save the updated PDF with AcroForm fields
             with open(temp_pdf_path, "wb") as pdf_out:
                 writer.write(pdf_out)
 
-            # Replace the original PDF
             os.replace(temp_pdf_path, pdf_path)
 
         return JsonResponse({"status": "Signatures saved successfully", "fields": saved_fields}, status=201)
@@ -235,7 +218,6 @@ class SignDocumentView(LoginRequiredMixin, View):
             },
         )
 
-
     def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
         signature_fields = SignatureField.objects.filter(
@@ -245,121 +227,68 @@ class SignDocumentView(LoginRequiredMixin, View):
         if not signature_fields.exists():
             return JsonResponse({"error": "No pending signatures found"}, status=400)
 
-        # Ensure user has an uploaded signature image
         signature_path = get_user_signature_path(request.user)
         if not signature_path or not os.path.exists(signature_path):
             return JsonResponse({"error": "No registered signature image found"}, status=400)
 
-        # Paths for input & output
         pdf_path = document.file.path
         temp_pdf_path = os.path.join(settings.MEDIA_ROOT, f"temp_{document.file.name}")
         signed_pdf_path = os.path.join(settings.MEDIA_ROOT, f"signed_documents/{document.file.name}")
 
-        # Step 1: Ensure PDF has signature fields & overlay the signature image
-        reader = PdfReader(pdf_path)
-        writer = PdfWriter()
-
-        for page_number in range(len(reader.pages)):
-            page = reader.pages[page_number]
-
-            # Get all signature fields on this page
-            page_fields = [
-                field for field in signature_fields if field.page == page_number + 1
-            ]
-
-            for field in page_fields:
-                # Load the signature image
-                img = Image.open(signature_path)
-                img_width, img_height = img.size
-
-                # Convert image to an annotation
-                annotation = DictionaryObject({
-                    NameObject("/Type"): NameObject("/Annot"),
-                    NameObject("/Subtype"): NameObject("/Stamp"),
-                    NameObject("/Rect"): ArrayObject([
-                        NumberObject(field.x),
-                        NumberObject(field.y),
-                        NumberObject(field.x + img_width / 3),  # Scale down if needed
-                        NumberObject(field.y + img_height / 3)
-                    ]),
-                    NameObject("/NM"): NameObject(field.field_name),
-                    NameObject("/P"): page.indirect_reference
-                })
-
-                # Add annotation to page
-                if "/Annots" in page:
-                    page["/Annots"].append(annotation)
-                else:
-                    page[NameObject("/Annots")] = ArrayObject([annotation])
-
-            # Add modified page to writer
-            writer.add_page(page)
-
-        # Ensure output directories exist before writing
+        # Ensure directories exist
         os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)
         os.makedirs(os.path.dirname(signed_pdf_path), exist_ok=True)
 
-        # Save the PDF with the signature overlay
-        with open(temp_pdf_path, "wb") as temp_pdf:
-            writer.write(temp_pdf)
-
-        # Step 2: Ensure the signature fields exist before signing
-        with open(temp_pdf_path, "rb") as pdf_in:
+        with open(pdf_path, "rb") as pdf_in:
             writer = IncrementalPdfFileWriter(pdf_in)
 
-            # Ensure the PDF has an AcroForm
-            root = writer.root
-            if "/AcroForm" not in root:
-                acroform_dict = DictionaryObject({
-                    NameObject("/Fields"): writer.add_object(ArrayObject())
-                })
-                root[NameObject("/AcroForm")] = writer.add_object(acroform_dict)
-
-            acro_form = root["/AcroForm"]
-
-            # Ensure the AcroForm has a "/Fields" array
-            if "/Fields" not in acro_form:
-                acro_form[NameObject("/Fields")] = writer.add_object(ArrayObject())
-
-            # Retrieve assigned field names
-            field_names = [field.field_name for field in signature_fields]
-            if not field_names:
-                return JsonResponse({"error": "No valid signature fields found"}, status=400)
-
-            # **Debugging: Print available fields before signing**
-            available_fields = list(enumerate_sig_fields(writer))
-            available_field_names = [field.field_name for field in available_fields]
-            print(f"Available Signature Fields: {available_field_names}")
-
-            # Verify fields exist
-            for field_name in field_names:
-                if field_name not in available_field_names:
-                    return JsonResponse({"error": f"Signature field '{field_name}' not found in the PDF"}, status=400)
-
-            # Load certificate & private key
             cert_path = os.path.join(settings.BASE_DIR, "certs/my_certificate.pfx")
-            signer = signers.SimpleSigner.load_pkcs12(
-                cert_path,
-                passphrase=b""
-            )
+            try:
+                signer = signers.SimpleSigner.load_pkcs12(cert_path, passphrase=b"")  # Provide correct passphrase if needed
+            except Exception as e:
+                print(f"Error loading certificate: {e}")
+                return JsonResponse({"error": "Error loading certificate"}, status=500)
 
-            # Sign each field explicitly
-            for field_name in field_names:
-                meta = PdfSignatureMetadata(field_name=field_name)
+            for field in signature_fields:
+                try:
+                    # 1. Load and scale image (PIL for size)
+                    img = Image.open(signature_path)
+                    img_width, img_height = img.size
 
-                pdf_signer = PdfSigner(
-                    signature_meta=meta,
-                    signer=signer,
-                )
+                    max_width = field.width
+                    max_height = field.height
 
-                with open(signed_pdf_path, "wb") as pdf_out:
-                    pdf_signer.sign_pdf(
-                        writer,
-                        output=pdf_out,
-                        existing_fields_only=True,
+                    scale_factor = min(max_width / img_width, max_height / img_height) if img_width and img_height else 1
+                    scaled_width = int(img_width * scale_factor)
+                    scaled_height = int(img_height * scale_factor)
+
+                    # 2. Create PdfImage instance
+                    pdf_image = PdfImage(signature_path, writer=writer)
+
+                    # 3. Define the signature field spec
+                    spec = SigFieldSpec(
+                        sig_field_name=field.field_name,  # Or a unique name
+                        on_page=field.page - 1,  # Page index is 0-based
+                        box=(field.x, field.y, field.x + scaled_width, field.y + scaled_height)  # Use scaled dimensions
                     )
 
-            # Mark fields as signed in the database
+                    # 4. Sign the field (Crucially, handle appearance here!)
+                    meta = PdfSignatureMetadata(field_name=field.field_name)
+                    pdf_signer = PdfSigner(signature_meta=meta, signer=signer)
+
+                    with open(temp_pdf_path, "wb") as temp_pdf:  # Sign to temp file first
+                        pdf_signer.sign_pdf(writer, output=temp_pdf, existing_fields_only=True, appearance=pdf_image, sig_field_spec=spec)  # Pass spec and appearance
+
+                    os.replace(temp_pdf_path, signed_pdf_path)  # Replace original with signed version
+
+                except Exception as e:
+                    print(f"Error signing field {field.field_name}: {e}")
+                    return JsonResponse({"error": f"Error signing field {field.field_name}: {e}"}, status=500)
+
             signature_fields.update(signed=True)
 
         return JsonResponse({"status": "Signed successfully", "signed_pdf": signed_pdf_path})
+
+
+
+

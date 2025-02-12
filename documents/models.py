@@ -25,11 +25,13 @@ class SignatureField(models.Model):
         on_delete=models.CASCADE,
         related_name="assigned_signatures"
     )
-    page = models.IntegerField()
     x = models.FloatField()
     y = models.FloatField()
-    field_name = models.CharField(max_length=255, default=None)  # ✅ Ensure correct field name
+    width = models.FloatField()
+    height = models.FloatField()
+    page = models.IntegerField()
+    field_name = models.CharField(max_length=255, unique=True)
     signed = models.BooleanField(default=False)
 
     def __str__(self):
-        return f"Signature for {self.assigned_user.username} on {self.document.file.name}"
+        return f"{self.assigned_user.username} - {self.field_name} ({self.page})"
