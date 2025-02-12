@@ -13,6 +13,7 @@ from django.http import JsonResponse
 from django.http.response import HttpResponseRedirect
 from django.shortcuts import redirect
 from django.shortcuts import render, get_object_or_404
+from django.urls.base import reverse
 from django.views import View
 from django.views.generic import ListView
 from django.views.generic.base import TemplateView
@@ -26,7 +27,7 @@ from accounts.models import Account
 from signatures.utils import get_user_signature_path
 from .forms import DocumentUploadForm
 from .models import Document, SignatureField
-from .utils import remove_hybrid_xrefs
+from .utils import remove_hybrid_xrefs, generate_qr_code, stamp_pdf_with_qr
 
 # Set up logging (customize as needed)
 logger = logging.getLogger(__name__)  # Use your view's module name
@@ -79,7 +80,7 @@ class DeleteDocumentView(LoginRequiredMixin, View):
     Allows a logged-in user to delete their own documents.
     """
 
-    def get(self, request, pk):
+    def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
 
         # Ensure only the owner can delete the document
@@ -95,9 +96,9 @@ class DeleteDocumentView(LoginRequiredMixin, View):
             # Delete the document from the database
             document.delete()
 
-            return HttpResponseRedirect("document_list")
+            return JsonResponse({"status": True})
         except Exception as e:
-            return HttpResponseRedirect("document_list")
+            return JsonResponse({"status": False})
 
 
 class ToSignListView(LoginRequiredMixin, ListView):
@@ -111,6 +112,20 @@ class ToSignListView(LoginRequiredMixin, ListView):
         return Document.objects.filter(
             signature_fields__assigned_user=self.request.user,
             signature_fields__signed=False
+        ).annotate(num_signatures=Count('signature_fields'))
+
+
+class SignedListView(LoginRequiredMixin, ListView):
+    template_name = "documents/signed_list.html"
+    context_object_name = "signed_documents"
+
+    def get_queryset(self):
+        """
+        Get distinct documents that the user needs to sign, consolidating multiple required signatures.
+        """
+        return Document.objects.filter(
+            signature_fields__assigned_user=self.request.user,
+            signature_fields__signed=True
         ).annotate(num_signatures=Count('signature_fields'))
 
 
@@ -213,6 +228,10 @@ class SignDocumentView(LoginRequiredMixin, View):
             signed=False
         )
 
+        latest_document = document.get_latest_document()
+        if latest_document:
+            document.update_signed_document(latest_document)
+
         # Convert QuerySet -> JSON for the template
         signature_fields_data = list(signature_fields.values("id", "x", "y", "page"))
         return render(
@@ -238,6 +257,8 @@ class SignDocumentView(LoginRequiredMixin, View):
             return JsonResponse({"error": "No registered signature image found"}, status=400)
 
         pdf_path = document.file.path
+
+
         signed_pdf_path = os.path.join(settings.MEDIA_ROOT, f"signed_documents/{document.file.name}")
 
         # Ensure directory exists
@@ -277,6 +298,8 @@ class SignDocumentView(LoginRequiredMixin, View):
                         logger.error(error_message, exc_info=True)
                         return JsonResponse({"error": error_message}, status=500)
 
+                    field.signed = True
+                    field.save()
 
                 except Exception as e:
                     error_message = f"Error processing image or field: {e}"
@@ -285,13 +308,25 @@ class SignDocumentView(LoginRequiredMixin, View):
 
             doc.save(signed_pdf_path)
             doc.close()
+            document.update_signed_document(signed_pdf_path)
 
-        except fitz.fitz.FileNotFoundError:
+        except fitz.FileNotFoundError:
             return JsonResponse({"error": "PDF file not found"}, status=404)
         except Exception as e:
             error_message = "A general error occurred processing the PDF: " + str(e)
             logger.error(error_message, exc_info=True)
             return JsonResponse({"error": error_message}, status=500)
 
-        return JsonResponse({"status": "Images added successfully", "signed_pdf": signed_pdf_path})
+        if document.check_complete():
+            qr_dir_path = os.path.join(settings.MEDIA_ROOT, f"qr")
+            base_name = os.path.basename(document.file.name)
+            os.makedirs(qr_dir_path, exist_ok=True)
+            qr_path = f"{qr_dir_path}/{base_name}.jpg"
+            generate_qr_code(base_name, qr_path)
+            stamp_pdf_with_qr(qr_path, signed_pdf_path, pdf_path)
+            document.signed = True
+            document.save()
+
+
+        return JsonResponse({"status": "Signed successfully", "signed_pdf": signed_pdf_path})
 
