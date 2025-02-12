@@ -1,5 +1,7 @@
+import io
 import json
 import json
+import logging
 import os
 
 from PIL import Image
@@ -11,24 +13,29 @@ from django.http import JsonResponse
 from django.http.response import HttpResponseRedirect
 from django.shortcuts import redirect
 from django.shortcuts import render, get_object_or_404
+from django.urls.base import reverse
 from django.views import View
 from django.views.generic import ListView
 from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
 from pikepdf import Pdf
-from pyhanko.pdf_utils.images import PdfImage
-from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-from pyhanko.sign import signers
+import fitz
 from pyhanko.sign.fields import SigFieldSpec, append_signature_field
-from pyhanko.sign.signers.pdf_signer import PdfSigner, PdfSignatureMetadata
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 
 from accounts.models import Account
 from signatures.utils import get_user_signature_path
 from .forms import DocumentUploadForm
 from .models import Document, SignatureField
-from .utils import remove_hybrid_xrefs
+from .utils import remove_hybrid_xrefs, generate_qr_code, stamp_pdf_with_qr
 
+# Set up logging (customize as needed)
+logger = logging.getLogger(__name__)  # Use your view's module name
+logger.setLevel(logging.ERROR)  # Set the desired logging level
+handler = logging.StreamHandler()  # Log to the console (or a file)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 class UploadDocumentView(LoginRequiredMixin, FormView):
     template_name = "documents/upload_document.html"
@@ -73,7 +80,7 @@ class DeleteDocumentView(LoginRequiredMixin, View):
     Allows a logged-in user to delete their own documents.
     """
 
-    def get(self, request, pk):
+    def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
 
         # Ensure only the owner can delete the document
@@ -89,9 +96,9 @@ class DeleteDocumentView(LoginRequiredMixin, View):
             # Delete the document from the database
             document.delete()
 
-            return HttpResponseRedirect("document_list")
+            return JsonResponse({"status": True})
         except Exception as e:
-            return HttpResponseRedirect("document_list")
+            return JsonResponse({"status": False})
 
 
 class ToSignListView(LoginRequiredMixin, ListView):
@@ -105,6 +112,20 @@ class ToSignListView(LoginRequiredMixin, ListView):
         return Document.objects.filter(
             signature_fields__assigned_user=self.request.user,
             signature_fields__signed=False
+        ).annotate(num_signatures=Count('signature_fields'))
+
+
+class SignedListView(LoginRequiredMixin, ListView):
+    template_name = "documents/signed_list.html"
+    context_object_name = "signed_documents"
+
+    def get_queryset(self):
+        """
+        Get distinct documents that the user needs to sign, consolidating multiple required signatures.
+        """
+        return Document.objects.filter(
+            signature_fields__assigned_user=self.request.user,
+            signature_fields__signed=True
         ).annotate(num_signatures=Count('signature_fields'))
 
 
@@ -207,6 +228,10 @@ class SignDocumentView(LoginRequiredMixin, View):
             signed=False
         )
 
+        latest_document = document.get_latest_document()
+        if latest_document:
+            document.update_signed_document(latest_document)
+
         # Convert QuerySet -> JSON for the template
         signature_fields_data = list(signature_fields.values("id", "x", "y", "page"))
         return render(
@@ -221,33 +246,26 @@ class SignDocumentView(LoginRequiredMixin, View):
     def post(self, request, pk):
         document = get_object_or_404(Document, pk=pk)
         signature_fields = SignatureField.objects.filter(
-            document=document, assigned_user=request.user, signed=False
+            document=document, assigned_user=request.user
         )
 
         if not signature_fields.exists():
-            return JsonResponse({"error": "No pending signatures found"}, status=400)
+            return JsonResponse({"error": "No signature fields found"}, status=400)
 
         signature_path = get_user_signature_path(request.user)
         if not signature_path or not os.path.exists(signature_path):
             return JsonResponse({"error": "No registered signature image found"}, status=400)
 
         pdf_path = document.file.path
-        temp_pdf_path = os.path.join(settings.MEDIA_ROOT, f"temp_{document.file.name}")
+
+
         signed_pdf_path = os.path.join(settings.MEDIA_ROOT, f"signed_documents/{document.file.name}")
 
-        # Ensure directories exist
-        os.makedirs(os.path.dirname(temp_pdf_path), exist_ok=True)
+        # Ensure directory exists
         os.makedirs(os.path.dirname(signed_pdf_path), exist_ok=True)
 
-        with open(pdf_path, "rb") as pdf_in:
-            writer = IncrementalPdfFileWriter(pdf_in)
-
-            cert_path = os.path.join(settings.BASE_DIR, "certs/my_certificate.pfx")
-            try:
-                signer = signers.SimpleSigner.load_pkcs12(cert_path, passphrase=b"")  # Provide correct passphrase if needed
-            except Exception as e:
-                print(f"Error loading certificate: {e}")
-                return JsonResponse({"error": "Error loading certificate"}, status=500)
+        try:
+            doc = fitz.open(pdf_path)
 
             for field in signature_fields:
                 try:
@@ -262,33 +280,53 @@ class SignDocumentView(LoginRequiredMixin, View):
                     scaled_width = int(img_width * scale_factor)
                     scaled_height = int(img_height * scale_factor)
 
-                    # 2. Create PdfImage instance
-                    pdf_image = PdfImage(signature_path, writer=writer)
+                    img = img.resize((scaled_width, scaled_height))
 
-                    # 3. Define the signature field spec
-                    spec = SigFieldSpec(
-                        sig_field_name=field.field_name,  # Or a unique name
-                        on_page=field.page - 1,  # Page index is 0-based
-                        box=(field.x, field.y, field.x + scaled_width, field.y + scaled_height)  # Use scaled dimensions
-                    )
+                    # ***In-Memory File Handling (Robust Fix)***
+                    img_bytes = io.BytesIO()  # Create an in-memory byte stream
+                    img.save(img_bytes, format="PNG")  # Save PIL image to memory
+                    img_bytes.seek(0)  # Reset stream position to the beginning
 
-                    # 4. Sign the field (Crucially, handle appearance here!)
-                    meta = PdfSignatureMetadata(field_name=field.field_name)
-                    pdf_signer = PdfSigner(signature_meta=meta, signer=signer)
+                    # 2. Add image to the PDF page (Corrected insert_image call)
+                    page = doc[field.page - 1]
+                    rect = fitz.Rect(field.x, field.y, field.x + scaled_width, field.y + scaled_height)
 
-                    with open(temp_pdf_path, "wb") as temp_pdf:  # Sign to temp file first
-                        pdf_signer.sign_pdf(writer, output=temp_pdf, existing_fields_only=True, appearance=pdf_image, sig_field_spec=spec)  # Pass spec and appearance
+                    try:
+                        page.insert_image(rect, stream=img_bytes)  # Correct call for 1.25.3
+                    except Exception as e:
+                        error_message = f"Error inserting image: {e}"
+                        logger.error(error_message, exc_info=True)
+                        return JsonResponse({"error": error_message}, status=500)
 
-                    os.replace(temp_pdf_path, signed_pdf_path)  # Replace original with signed version
+                    field.signed = True
+                    field.save()
 
                 except Exception as e:
-                    print(f"Error signing field {field.field_name}: {e}")
-                    return JsonResponse({"error": f"Error signing field {field.field_name}: {e}"}, status=500)
+                    error_message = f"Error processing image or field: {e}"
+                    logger.error(error_message, exc_info=True)
+                    return JsonResponse({"error": error_message}, status=500)
 
-            signature_fields.update(signed=True)
+            doc.save(signed_pdf_path)
+            doc.close()
+            document.update_signed_document(signed_pdf_path)
+
+        except fitz.FileNotFoundError:
+            return JsonResponse({"error": "PDF file not found"}, status=404)
+        except Exception as e:
+            error_message = "A general error occurred processing the PDF: " + str(e)
+            logger.error(error_message, exc_info=True)
+            return JsonResponse({"error": error_message}, status=500)
+
+        if document.check_complete():
+            qr_dir_path = os.path.join(settings.MEDIA_ROOT, f"qr")
+            base_name = os.path.basename(document.file.name)
+            os.makedirs(qr_dir_path, exist_ok=True)
+            qr_path = f"{qr_dir_path}/{base_name}.jpg"
+            generate_qr_code(base_name, qr_path)
+            stamp_pdf_with_qr(qr_path, signed_pdf_path, pdf_path)
+            document.signed = True
+            document.save()
+
 
         return JsonResponse({"status": "Signed successfully", "signed_pdf": signed_pdf_path})
-
-
-
 

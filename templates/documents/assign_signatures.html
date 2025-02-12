@@ -146,6 +146,7 @@ document.getElementById("save-button").addEventListener("click", function() {
     .then(data => {
         alert(data.status);
         signatureFields = [];
+
     })
     .catch(err => console.error("Error saving signatures:", err));
 });
