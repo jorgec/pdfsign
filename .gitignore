@@ -11,3 +11,7 @@ accounts/__pycache__/
 accounts/channels/.DS_Store
 
 *.pyc
+
+
+media/
+static/

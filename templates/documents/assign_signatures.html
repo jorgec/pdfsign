@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Assign Signatures{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <h1 class="text-2xl font-bold">Assign Signatures for {{ document.file.name }}</h1>
+</div>
+
+<!-- Controls -->
+<div class="flex items-center space-x-4">
+  <label for="user-select" class="text-gray-700">Assign Next Click to:</label>
+  <select id="user-select" class="border p-1 rounded">
+    {% for user in users %}
+      <option value="{{ user.id }}">{{ user.username }}</option>
+    {% endfor %}
+  </select>
+  <button id="prev-page" class="bg-blue-500 text-white px-2 py-1 rounded">Prev Page</button>
+  <button id="next-page" class="bg-blue-500 text-white px-2 py-1 rounded">Next Page</button>
+  <span id="page-info" class="text-gray-700"></span>
+</div>
+
+<!-- PDF Container -->
+<div id="pdf-container" class="mt-4 relative">
+  <canvas id="pdf-canvas" class="border"></canvas>
+</div>
+
+<!-- Save Button -->
+<button id="save-button" class="mt-4 bg-green-500 text-white px-4 py-2 rounded">
+  Save Signatures
+</button>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
+<script>
+ const pdfUrl = "{{ document.file.url }}"; // URL of the uploaded PDF
+let pdfDoc = null;
+let pageNum = 1;
+let pageRendering = false;
+let pageNumPending = null;
+let scale = 1.0;  // Adjust scale as needed
+let canvas = document.getElementById('pdf-canvas');
+let ctx = canvas.getContext('2d');
+
+// Store signature fields
+let signatureFields = [];
+
+// Get document ID from Django template
+const documentId = {{ document.pk }};
+
+// Render the page
+function renderPage(num) {
+    pageRendering = true;
+    pdfDoc.getPage(num).then(function(page) {
+        let viewport = page.getViewport({ scale: scale });
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        let renderContext = {
+            canvasContext: ctx,
+            viewport: viewport
+        };
+        let renderTask = page.render(renderContext);
+
+        renderTask.promise.then(function() {
+            pageRendering = false;
+            if (pageNumPending !== null) {
+                renderPage(pageNumPending);
+                pageNumPending = null;
+            }
+            document.getElementById("page-info").textContent = `Page ${pageNum} of ${pdfDoc.numPages}`;
+        });
+    });
+}
+
+function queueRenderPage(num) {
+    if (pageRendering) {
+        pageNumPending = num;
+    } else {
+        renderPage(num);
+    }
+}
+
+function onPrevPage() {
+    if (pageNum <= 1) return;
+    pageNum--;
+    queueRenderPage(pageNum);
+}
+
+function onNextPage() {
+    if (pageNum >= pdfDoc.numPages) return;
+    pageNum++;
+    queueRenderPage(pageNum);
+}
+
+// When canvas is clicked, record a signature field
+canvas.addEventListener("click", function(event) {
+    let rect = canvas.getBoundingClientRect();
+    let x = event.clientX - rect.left;
+    let y = event.clientY - rect.top;
+
+    // Which user is currently selected?
+    let userId = document.getElementById("user-select").value;
+
+    // Store the signature field
+    signatureFields.push({
+        x: x,
+        y: (canvas.height - y),  // Ensuring correct Y position
+        page: pageNum,
+        assigned_user_id: userId  // Ensuring correct key name for Django
+    });
+
+    // Display a visual marker on the canvas
+    let marker = document.createElement("div");
+    marker.style.position = "absolute";
+    marker.style.left = (rect.left + x) + "px";
+    marker.style.top = (rect.top + y) + "px";
+    marker.style.width = "10px";
+    marker.style.height = "10px";
+    marker.style.backgroundColor = "red";
+    marker.style.borderRadius = "50%";
+    marker.style.zIndex = 10;
+    marker.title = "User ID: " + userId;
+    document.body.appendChild(marker);
+});
+
+// Attach event listeners for page navigation
+document.getElementById("prev-page").addEventListener("click", onPrevPage);
+document.getElementById("next-page").addEventListener("click", onNextPage);
+
+// Save the signature fields to the server
+document.getElementById("save-button").addEventListener("click", function() {
+    fetch(`/documents/save_signatures/${documentId}/`, {  // 🔹 Pass pk in URL
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": "{{ csrf_token }}"
+        },
+        body: JSON.stringify({
+            signatures: signatureFields  // Ensure correct payload structure
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === "Signatures saved successfully") {
+            alert("Signatures saved!");
+            signatureFields = []; // Clear stored signature data
+        } else {
+            alert("Error: " + data.error);
+        }
+    })
+    .catch(err => console.error("Error saving signatures:", err));
+});
+
+// Load the PDF
+pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+    pdfDoc = pdf;
+    renderPage(pageNum);
+});
+</script>
+{% endblock %}

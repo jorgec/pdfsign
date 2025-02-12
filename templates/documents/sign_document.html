@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+
+{% block title %}Sign Document{% endblock %}
+
+{% block content %}
+<div class="text-center">
+    <h1 class="text-2xl font-bold">Sign Document: {{ document.file.name }}</h1>
+</div>
+
+<!-- Navigation Buttons -->
+<div class="flex justify-center space-x-4 my-4">
+    <button id="prev-page" class="bg-gray-500 text-white px-3 py-1 rounded">Previous Page</button>
+    <span id="page-info" class="text-lg font-semibold"></span>
+    <button id="next-page" class="bg-gray-500 text-white px-3 py-1 rounded">Next Page</button>
+</div>
+
+<!-- PDF Display -->
+<div id="pdf-container" class="relative mx-auto w-full max-w-3xl">
+    <canvas id="pdf-canvas" class="border"></canvas>
+    <!-- Removed pointer-events-none to allow clicks on child markers -->
+    <div id="signature-overlay" class="absolute top-0 left-0 w-full h-full"></div>
+</div>
+
+<!-- Display how many signature fields are signed out of total -->
+<div id="signature-status" class="text-center mt-4 text-gray-700 text-lg">
+    Signed <span id="signed-count">0</span> / <span id="total-count">0</span> fields
+</div>
+
+<!-- Save Button (Initially Hidden) -->
+<button id="save-button" class="mt-4 bg-green-500 text-white px-4 py-2 rounded hidden">
+    Save Signatures
+</button>
+
+<!-- Directly embed the JSON (via safe). -->
+<script>
+    // 1. JSON: This pulls in the signature fields array.
+    let signatureFields = JSON.parse('{{ signature_fields_json|safe }}');
+</script>
+
+<!-- PDF.js -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js";
+</script>
+
+<script>
+
+document.addEventListener("DOMContentLoaded", function() {
+    const pdfUrl = "{{ document.file.url }}";  // URL of the PDF file
+    let pdfDoc = null;
+    let pageNum = 1;
+    let scale = 1.2;
+
+    // Canvas setup
+    let canvas = document.getElementById("pdf-canvas");
+    let ctx = canvas.getContext("2d");
+
+    // Track which fields have been clicked
+    let signedFields = new Set();
+
+    // Update counters
+    document.getElementById("total-count").textContent = signatureFields.length;
+    function updateCounter() {
+        document.getElementById("signed-count").textContent = signedFields.size;
+        if (signedFields.size === signatureFields.length) {
+            document.getElementById("save-button").classList.remove("hidden");
+        }
+    }
+
+    // Render a specific page
+    function renderPage(num) {
+        pdfDoc.getPage(num).then(function(page) {
+            let viewport = page.getViewport({ scale: scale });
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            let renderContext = {
+                canvasContext: ctx,
+                viewport: viewport
+            };
+            page.render(renderContext).promise.then(() => {
+                drawSignatureFields(num);
+            });
+
+            // Update page info
+            document.getElementById("page-info").textContent = `Page ${num} of ${pdfDoc.numPages}`;
+        });
+    }
+
+    // Navigate to a different page
+    function queueRenderPage(num) {
+        if (!pdfDoc) return;
+        pageNum = num;
+        renderPage(pageNum);
+    }
+
+    // Draw signature fields on top of the PDF
+    function drawSignatureFields(pageNum) {
+        let overlay = document.getElementById("signature-overlay");
+        overlay.innerHTML = ""; // Clear existing markers
+
+        // Filter signature fields for the current page
+        let currentSignatures = signatureFields.filter(field => field.page === pageNum);
+
+        for (let field of currentSignatures) {
+            let marker = document.createElement("div");
+            marker.classList.add("absolute", "border-2", "border-red-500", "bg-red-200", "opacity-50");
+            marker.style.left = `${field.x}px`;
+            marker.style.top = `${field.y}px`;
+            marker.style.width = "100px";
+            marker.style.height = "50px";
+            marker.style.cursor = "pointer";
+            marker.style.zIndex = "10";        // Ensure above canvas
+            marker.style.pointerEvents = "auto"; // Enable clicking
+
+            // On click, mark it "signed" and change color to green
+            marker.addEventListener("click", function() {
+                if (!signedFields.has(field.id)) {
+                    signedFields.add(field.id);
+                    this.classList.replace("bg-red-200", "bg-green-200");
+                    this.classList.replace("border-red-500", "border-green-500");
+                    updateCounter();
+                }
+            });
+
+            overlay.appendChild(marker);
+        }
+
+        // Match overlay size to canvas
+        overlay.style.width = canvas.width + "px";
+        overlay.style.height = canvas.height + "px";
+    }
+
+    // Load the PDF
+    pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+        pdfDoc = pdf;
+        renderPage(pageNum);
+    });
+
+    // Next/Previous page buttons
+    document.getElementById("prev-page").addEventListener("click", function() {
+        if (pageNum > 1) {
+            queueRenderPage(pageNum - 1);
+        }
+    });
+
+    document.getElementById("next-page").addEventListener("click", function() {
+        if (pageNum < pdfDoc.numPages) {
+            queueRenderPage(pageNum + 1);
+        }
+    });
+
+    // Initial counter update
+    updateCounter();
+
+    const saveButton = document.getElementById("save-button");
+
+    // 2. When clicked, POST the data to Django
+    saveButton.addEventListener("click", function() {
+        // Example: sending the IDs of all signed fields to the server
+        const data = {
+            signed_field_ids: Array.from(signedFields),  // Convert the Set to an array
+        };
+
+        // Make an AJAX POST to your sign_document view
+        fetch("{% url 'sign_document' document.pk %}", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": "{{ csrf_token }}"
+            },
+            body: JSON.stringify(data),
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.status === "Signed successfully") {
+                alert("Document signed!");
+                // Optionally redirect or update UI
+            } else {
+                alert("Error signing: " + JSON.stringify(result));
+            }
+        })
+        .catch(error => {
+            console.error("Error:", error);
+            alert("Something went wrong.");
+        });
+    });
+});
+</script>
+{% endblock %}
