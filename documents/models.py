@@ -1,9 +1,11 @@
 from django.db import models
 from django.conf import settings
 
+
 def document_upload_path(instance, filename):
     """Generate a file path for storing user documents."""
     return f"documents/{instance.owner.username}/{filename}"
+
 
 class Document(models.Model):
     owner = models.ForeignKey(
@@ -17,6 +19,7 @@ class Document(models.Model):
 
     def __str__(self):
         return f"{self.file.name} (Uploaded by {self.owner.username})"
+
 
 class SignatureField(models.Model):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="signature_fields")
