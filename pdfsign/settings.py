@@ -149,4 +149,4 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = os.getenv('MEDIA_ROOT')
 
 STATIC_URL = '/static/'
-STATIC_ROOT = [os.getenv('STATIC_ROOT')]
+STATIC_ROOT = os.getenv('STATIC_ROOT')
