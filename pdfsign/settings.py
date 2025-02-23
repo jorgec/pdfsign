@@ -21,7 +21,6 @@ DBPASS = os.getenv("DBPASS")
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.0/howto/deployment/checklist/
 
@@ -80,24 +79,29 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'pdfsign.wsgi.application'
 
-
 # Database
 # https://docs.djangoproject.com/en/4.0/ref/settings/#databases
+default_db = {
+    'ENGINE': 'django.db.backends.postgresql',
+    'NAME': 'defaultdb',  # Replace with your actual database name
+    'USER': 'avnadmin',  # Replace with your actual username
+    'PASSWORD': DBPASS,  # Replace with your actual password
+    'HOST': 'pg-17521c49-jorge-b6cc.h.aivencloud.com',  # Replace with Aiven's provided hostname
+    'PORT': '20238',  # Typically 5432
+    'OPTIONS': {
+        'sslmode': 'require',  # Enforce SSL connection for security
+    },
+
+}
+if os.getenv("PDFSIGN_SQLITE"):
+    default_db = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',  # Or os.path.join(BASE_DIR, 'db.sqlite3') for older Python versions.
+    }
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'defaultdb',  # Replace with your actual database name
-        'USER': 'avnadmin',  # Replace with your actual username
-        'PASSWORD': DBPASS,  # Replace with your actual password
-        'HOST': 'pg-17521c49-jorge-b6cc.h.aivencloud.com',  # Replace with Aiven's provided hostname
-        'PORT': '20238',  # Typically 5432
-        'OPTIONS': {
-            'sslmode': 'require',  # Enforce SSL connection for security
-        },
-    }
+    'default': default_db
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/4.0/ref/settings/#auth-password-validators
@@ -117,7 +121,6 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # Internationalization
 # https://docs.djangoproject.com/en/4.0/topics/i18n/
 
@@ -128,7 +131,6 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
-
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.0/howto/static-files/
