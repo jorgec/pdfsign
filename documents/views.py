@@ -319,7 +319,7 @@ class SignDocumentView(LoginRequiredMixin, View):
 
         if document.check_complete():
             qr_dir_path = os.path.join(settings.MEDIA_ROOT, f"qr")
-            base_name = os.path.basename(document.file.name)
+            base_name = f"{settings.SITE_URL}{document.file.url}"
             os.makedirs(qr_dir_path, exist_ok=True)
             qr_path = f"{qr_dir_path}/{base_name}.jpg"
             generate_qr_code(base_name, qr_path)

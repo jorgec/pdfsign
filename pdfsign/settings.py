@@ -17,6 +17,7 @@ load_dotenv()
 
 ### ENVS ###
 DBPASS = os.getenv("DBPASS")
+SITE_URL = os.getenv("SITE_URL")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
