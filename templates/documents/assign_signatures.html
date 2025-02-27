@@ -32,129 +32,165 @@
   Save Signatures
 </button>
 
-<!-- Scripts -->
+<!-- PDF.js library -->
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
 <script>
-const pdfUrl = "{{ document.file.url }}";
-let pdfDoc = null;
-let pageNum = 1;
-let scale = 1.0;
-let canvas = document.getElementById('pdf-canvas');
-let ctx = canvas.getContext('2d');
-let signatureFields = [];
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js";
 
-let isDrawing = false;
-let startX = 0, startY = 0, endX = 0, endY = 0;
+  const pdfUrl = "{{ document.file.url }}";
+  let pdfDoc = null;
+  let pageNum = 1;
+  let canvas = document.getElementById('pdf-canvas');
+  let ctx = canvas.getContext('2d');
 
-// Adjust coordinates for scrolling
-function getMousePosition(event) {
-    let rect = canvas.getBoundingClientRect();
-    let scrollTop = document.documentElement.scrollTop || document.body.scrollTop;
-    let scrollLeft = document.documentElement.scrollLeft || document.body.scrollLeft;
+  // This scale is how large we'll render the PDF on screen:
+  let renderScale = 1.0;
 
-    return {
-        x: event.clientX - rect.left + scrollLeft,
-        y: event.clientY - rect.top + scrollTop
-    };
-}
+  // We'll store the actual (native) PDF width in points for each page
+  // so we can compute "1/3 width" in PDF coordinates.
+  // Example: pdfPageSizes[pageNumber] = { width: 612, height: 792, ... }
+  let pdfPageSizes = {};
 
-// Start drawing a box
-canvas.addEventListener("mousedown", function(event) {
-    isDrawing = true;
-    let pos = getMousePosition(event);
-    startX = pos.x;
-    startY = pos.y;
-});
+  // We'll store signature fields in PDF coords here before saving.
+  // Each item: { page, assigned_user_id, x_pdf, y_pdf, width_pdf, height_pdf }
+  let signatureFields = [];
 
-// Stop drawing & store signature field
-canvas.addEventListener("mouseup", function(event) {
-    if (!isDrawing) return;
-    isDrawing = false;
-
-    let pos = getMousePosition(event);
-    endX = pos.x;
-    endY = pos.y;
-
-    let width = Math.abs(endX - startX);
-    let height = Math.abs(endY - startY);
-    let userId = document.getElementById("user-select").value;
-
-    if (width > 10 && height > 10) {
-        signatureFields.push({
-            x: Math.min(startX, endX),
-            y: Math.min(startY, endY),
-            width: width,
-            height: height,
-            page: pageNum,
-            assigned_user_id: userId
-        });
-
-        let overlay = document.getElementById("signature-overlay");
-        let rect = document.createElement("div");
-        rect.style.position = "absolute";
-        rect.style.left = `${startX}px`;
-        rect.style.top = `${startY}px`;
-        rect.style.width = `${width}px`;
-        rect.style.height = `${height}px`;
-        rect.style.border = "2px solid red";
-        rect.style.backgroundColor = "rgba(255, 0, 0, 0.3)";
-        rect.style.zIndex = "10";
-        rect.title = `User: ${userId}`;
-        overlay.appendChild(rect);
-    }
-});
-
-// Render the PDF
-function renderPage(num) {
+  // Render a given page at renderScale
+  function renderPage(num) {
     pdfDoc.getPage(num).then(function(page) {
-        let viewport = page.getViewport({ scale: scale });
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        let renderContext = { canvasContext: ctx, viewport: viewport };
-        return page.render(renderContext);
-    }).then(() => {
-        document.getElementById("page-info").textContent = `Page ${pageNum} of ${pdfDoc.numPages}`;
+      // First, find the PDF's native (scale=1) width/height, and cache it.
+      // This is separate from how we actually render to screen.
+      let unscaledViewport = page.getViewport({ scale: 1 });
+      pdfPageSizes[num] = {
+        width: unscaledViewport.width,
+        height: unscaledViewport.height
+      };
+
+      // Now actually render it to the canvas for the user
+      let viewport = page.getViewport({ scale: renderScale });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      let renderContext = {
+        canvasContext: ctx,
+        viewport: viewport
+      };
+      page.render(renderContext).promise.then(() => {
+        document.getElementById("page-info").textContent =
+          `Page ${pageNum} of ${pdfDoc.numPages}`;
+
+        // Clear existing overlays for new page
+        document.getElementById("signature-overlay").innerHTML = "";
+
+        // Draw the existing signatures for this page (if any)
+        drawExistingBoxes(num);
+      });
     });
-}
+  }
 
-// Pagination controls
-document.getElementById("prev-page").addEventListener("click", function() {
+  // Helper: draw boxes that we've already placed on this page
+  function drawExistingBoxes(page) {
+    let overlay = document.getElementById("signature-overlay");
+
+    // Filter any signature fields for this page
+    let fieldsOnThisPage = signatureFields.filter(f => f.page === page);
+
+    for (let f of fieldsOnThisPage) {
+      // Convert PDF coords -> current canvas coords
+      let pixelX = f.x_pdf * renderScale;
+      let pixelY = f.y_pdf * renderScale;
+      let pixelW = f.width_pdf * renderScale;
+      let pixelH = f.height_pdf * renderScale;
+
+      let box = document.createElement("div");
+      box.style.position = "absolute";
+      box.style.left = pixelX + "px";
+      box.style.top = pixelY + "px";
+      box.style.width = pixelW + "px";
+      box.style.height = pixelH + "px";
+      box.style.border = "2px solid red";
+      box.style.backgroundColor = "rgba(255, 0, 0, 0.3)";
+      box.title = `User: ${f.assigned_user_id}`;
+      overlay.appendChild(box);
+    }
+  }
+
+  // On canvas click: place a new signature field automatically
+  canvas.addEventListener("click", function(event) {
+    if (!pdfDoc) return;
+
+    // Determine the (x, y) in canvas pixels
+    let rect = canvas.getBoundingClientRect();
+    let xCanvas = event.clientX - rect.left;
+    let yCanvas = event.clientY - rect.top;
+
+    // Convert to PDF points by dividing out the scale
+    let xPdf = xCanvas / renderScale;
+    let yPdf = yCanvas / renderScale;
+
+    // We'll compute width and height in PDF points:
+    //  - 1/3 of the page's native width
+    //  - 0.75 inches = 54 PDF points
+    let pageSize = pdfPageSizes[pageNum];
+    let wPdf = pageSize.width / 3;  // one-third of page width
+    let hPdf = 54;                  // 0.75" * 72 points/inch
+
+    // Store in array
+    let userId = document.getElementById("user-select").value;
+    let field = {
+      page: pageNum,
+      assigned_user_id: userId,
+      x_pdf: xPdf,
+      y_pdf: yPdf,
+      width_pdf: wPdf,
+      height_pdf: hPdf
+    };
+    signatureFields.push(field);
+
+    // Immediately draw an overlay box
+    drawExistingBoxes(pageNum);
+  });
+
+  // Pagination controls
+  document.getElementById("prev-page").addEventListener("click", function() {
     if (pageNum > 1) {
-        pageNum--;
-        renderPage(pageNum);
+      pageNum--;
+      renderPage(pageNum);
     }
-});
+  });
 
-document.getElementById("next-page").addEventListener("click", function() {
+  document.getElementById("next-page").addEventListener("click", function() {
     if (pageNum < pdfDoc.numPages) {
-        pageNum++;
-        renderPage(pageNum);
+      pageNum++;
+      renderPage(pageNum);
     }
-});
+  });
 
-// Save the signature fields to the server
-document.getElementById("save-button").addEventListener("click", function() {
+  // Save the signature fields to the server
+  document.getElementById("save-button").addEventListener("click", function() {
+    // Example POST to your Django "save_signatures" view
+    // which should store x_pdf, y_pdf, width_pdf, height_pdf, page, assigned_user_id
+      console.log(JSON.stringify({ signatures: signatureFields }));
     fetch("{% url 'save_signatures' document.pk %}", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "X-CSRFToken": "{{ csrf_token }}"
-        },
-        body: JSON.stringify({ signatures: signatureFields })
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": "{{ csrf_token }}"
+      },
+      body: JSON.stringify({ signatures: signatureFields })
     })
     .then(response => response.json())
     .then(data => {
-        alert(data.status);
-        signatureFields = [];
-
+      alert(data.status);
+      signatureFields = [];
     })
     .catch(err => console.error("Error saving signatures:", err));
-});
+  });
 
-// Load the PDF
-pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+  // Load the PDF
+  pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
     pdfDoc = pdf;
     renderPage(pageNum);
-});
+  });
 </script>
 {% endblock %}

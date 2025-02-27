@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Sign Document{% endblock %}
 
@@ -17,13 +18,7 @@
 <!-- PDF Display -->
 <div id="pdf-container" class="relative mx-auto w-full max-w-3xl">
     <canvas id="pdf-canvas" class="border"></canvas>
-    <!-- Removed pointer-events-none to allow clicks on child markers -->
     <div id="signature-overlay" class="absolute top-0 left-0 w-full h-full"></div>
-</div>
-
-<!-- Display how many signature fields are signed out of total -->
-<div id="signature-status" class="text-center mt-4 text-gray-700 text-lg">
-    Signed <span id="signed-count">0</span> / <span id="total-count">0</span> fields
 </div>
 
 <!-- Save Button (Initially Hidden) -->
@@ -31,160 +26,141 @@
     Save Signatures
 </button>
 
-<!-- Directly embed the JSON (via safe). -->
+<!-- This variable is set from your Django view, which returns
+     a JSON-encoded list of signature fields (in PDF coords). -->
 <script>
-    // 1. JSON: This pulls in the signature fields array.
-    let signatureFields = JSON.parse('{{ signature_fields_json|safe }}');
+  let signatureFields = JSON.parse('{{ signature_fields_json|safe }}');
 </script>
 
-<!-- PDF.js -->
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
 <script>
   pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js";
-</script>
 
-<script>
+  const pdfUrl = "{{ document.file.url }}";
+  let pdfDoc = null;
+  let pageNum = 1;
 
-document.addEventListener("DOMContentLoaded", function() {
-    const pdfUrl = "{{ document.file.url }}";  // URL of the PDF file
-    let pdfDoc = null;
-    let pageNum = 1;
-    let scale = 1.2;
+  // Scale factor for rendering on this page
+  let renderScale = 1.0;
 
-    // Canvas setup
-    let canvas = document.getElementById("pdf-canvas");
-    let ctx = canvas.getContext("2d");
+  let canvas = document.getElementById("pdf-canvas");
+  let ctx = canvas.getContext("2d");
 
-    // Track which fields have been clicked
-    let signedFields = new Set();
+  // A set of field IDs that the user has "signed".
+  // (If you want to allow partial signing, etc.)
+  let signedFields = new Set();
 
-    // Update counters
-    document.getElementById("total-count").textContent = signatureFields.length;
-    function updateCounter() {
-        document.getElementById("signed-count").textContent = signedFields.size;
-        if (signedFields.size === signatureFields.length) {
-            document.getElementById("save-button").classList.remove("hidden");
+  function renderPage(num) {
+    pdfDoc.getPage(num).then(function(page) {
+      let viewport = page.getViewport({ scale: renderScale });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      let renderContext = {
+        canvasContext: ctx,
+        viewport: viewport
+      };
+      // Render the page
+      page.render(renderContext).promise.then(() => {
+        drawSignatureFields(num, viewport.scale);
+      });
+
+      // Update page info
+      document.getElementById("page-info").textContent =
+        `Page ${num} of ${pdfDoc.numPages}`;
+    });
+  }
+
+  // Draw the fields (in PDF coords) as absolute-position divs
+  // scaled to the current renderScale
+  function drawSignatureFields(currentPage, scale) {
+    let overlay = document.getElementById("signature-overlay");
+    overlay.innerHTML = ""; // clear old markers
+
+    // Filter for fields on the current page
+    let fieldsForPage = signatureFields.filter(f => f.page === currentPage);
+
+    for (let f of fieldsForPage) {
+      let xPx = f.x_pdf * scale;
+      let yPx = f.y_pdf * scale;
+      let wPx = f.width_pdf * scale;
+      let hPx = f.height_pdf * scale;
+
+      let box = document.createElement("div");
+      box.classList.add("absolute", "border-2", "border-red-500", "bg-red-200", "opacity-50");
+      box.style.left = xPx + "px";
+      box.style.top = yPx + "px";
+      box.style.width = wPx + "px";
+      box.style.height = hPx + "px";
+      box.style.zIndex = "10";
+      box.style.pointerEvents = "auto";
+      box.style.cursor = "pointer";
+
+      // Example: on click, mark this field as "signed"
+      box.addEventListener("click", () => {
+        // In practice, you'd check if the user is the assigned user, etc.
+        if (!signedFields.has(f.id)) {
+          signedFields.add(f.id);
+          box.classList.replace("bg-red-200", "bg-green-200");
+          box.classList.replace("border-red-500", "border-green-500");
+          // Show save button if everything is signed, or partial logic, etc.
+          document.getElementById("save-button").classList.remove("hidden");
         }
+      });
+
+      overlay.appendChild(box);
     }
 
-    // Render a specific page
-    function renderPage(num) {
-        pdfDoc.getPage(num).then(function(page) {
-            let viewport = page.getViewport({ scale: scale });
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
+    // Match overlay size to the canvas
+    overlay.style.width = canvas.width + "px";
+    overlay.style.height = canvas.height + "px";
+  }
 
-            let renderContext = {
-                canvasContext: ctx,
-                viewport: viewport
-            };
-            page.render(renderContext).promise.then(() => {
-                drawSignatureFields(num);
-            });
-
-            // Update page info
-            document.getElementById("page-info").textContent = `Page ${num} of ${pdfDoc.numPages}`;
-        });
+  // Next/Previous page
+  document.getElementById("prev-page").addEventListener("click", function() {
+    if (pageNum > 1) {
+      pageNum--;
+      renderPage(pageNum);
     }
-
-    // Navigate to a different page
-    function queueRenderPage(num) {
-        if (!pdfDoc) return;
-        pageNum = num;
-        renderPage(pageNum);
+  });
+  document.getElementById("next-page").addEventListener("click", function() {
+    if (pageNum < pdfDoc.numPages) {
+      pageNum++;
+      renderPage(pageNum);
     }
+  });
 
-    // Draw signature fields on top of the PDF
-    function drawSignatureFields(pageNum) {
-        let overlay = document.getElementById("signature-overlay");
-        overlay.innerHTML = ""; // Clear existing markers
-
-        // Filter signature fields for the current page
-        let currentSignatures = signatureFields.filter(field => field.page === pageNum);
-
-        for (let field of currentSignatures) {
-            let marker = document.createElement("div");
-            marker.classList.add("absolute", "border-2", "border-red-500", "bg-red-200", "opacity-50");
-            marker.style.left = `${field.x}px`;
-            marker.style.top = `${field.y}px`;
-            marker.style.width = "100px";
-            marker.style.height = "50px";
-            marker.style.cursor = "pointer";
-            marker.style.zIndex = "10";        // Ensure above canvas
-            marker.style.pointerEvents = "auto"; // Enable clicking
-
-            // On click, mark it "signed" and change color to green
-            marker.addEventListener("click", function() {
-                if (!signedFields.has(field.id)) {
-                    signedFields.add(field.id);
-                    this.classList.replace("bg-red-200", "bg-green-200");
-                    this.classList.replace("border-red-500", "border-green-500");
-                    updateCounter();
-                }
-            });
-
-            overlay.appendChild(marker);
-        }
-
-        // Match overlay size to canvas
-        overlay.style.width = canvas.width + "px";
-        overlay.style.height = canvas.height + "px";
-    }
-
-    // Load the PDF
-    pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
-        pdfDoc = pdf;
-        renderPage(pageNum);
+  // Save button logic
+  document.getElementById("save-button").addEventListener("click", function() {
+    let data = {
+      signed_field_ids: Array.from(signedFields)
+    };
+    fetch("{% url 'sign_document' document.pk %}", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": "{{ csrf_token }}"
+      },
+      body: JSON.stringify(data)
+    })
+    .then(resp => resp.json())
+    .then(result => {
+      if (result.status === "Signed successfully") {
+        alert("Document fully signed!");
+      } else {
+        alert("Error: " + JSON.stringify(result));
+      }
+    })
+    .catch(err => {
+      console.error("Error:", err);
+      alert("Something went wrong.");
     });
+  });
 
-    // Next/Previous page buttons
-    document.getElementById("prev-page").addEventListener("click", function() {
-        if (pageNum > 1) {
-            queueRenderPage(pageNum - 1);
-        }
-    });
-
-    document.getElementById("next-page").addEventListener("click", function() {
-        if (pageNum < pdfDoc.numPages) {
-            queueRenderPage(pageNum + 1);
-        }
-    });
-
-    // Initial counter update
-    updateCounter();
-
-    const saveButton = document.getElementById("save-button");
-
-    // 2. When clicked, POST the data to Django
-    saveButton.addEventListener("click", function() {
-        // Example: sending the IDs of all signed fields to the server
-        const data = {
-            signed_field_ids: Array.from(signedFields),  // Convert the Set to an array
-        };
-
-        // Make an AJAX POST to your sign_document view
-        fetch("{% url 'sign_document' document.pk %}", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-CSRFToken": "{{ csrf_token }}"
-            },
-            body: JSON.stringify(data),
-        })
-        .then(response => response.json())
-        .then(result => {
-            if (result.status === "Signed successfully") {
-                alert("Document signed!");
-                // Optionally redirect or update UI
-            } else {
-                alert("Error signing: " + JSON.stringify(result));
-            }
-        })
-        .catch(error => {
-            console.error("Error:", error);
-            alert("Something went wrong.");
-        });
-    });
-});
+  // Load the PDF
+  pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+    pdfDoc = pdf;
+    renderPage(pageNum);
+  });
 </script>
 {% endblock %}

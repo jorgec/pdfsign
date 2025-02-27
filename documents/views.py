@@ -168,8 +168,8 @@ class SaveSignaturesView(LoginRequiredMixin, View):
 
             for field in fields:
                 user_id = field.get("assigned_user_id")
-                x, y, width, height, page = field.get("x"), field.get("y"), field.get("width"), field.get(
-                    "height"), field.get("page")
+                x, y, width, height, page = field.get("x_pdf"), field.get("y_pdf"), field.get("width_pdf"), field.get(
+                    "height_pdf"), field.get("page")
 
                 if user_id is None or x is None or y is None or page is None or width is None or height is None:
                     continue
@@ -180,11 +180,11 @@ class SaveSignaturesView(LoginRequiredMixin, View):
                 signature_field, created = SignatureField.objects.update_or_create(
                     document=document,
                     assigned_user=assigned_user,
-                    x=x,
-                    y=y,
+                    x_pdf=x,
+                    y_pdf=y,
                     page=page,
-                    width=width,
-                    height=height,
+                    width_pdf=width,
+                    height_pdf=height,
                     defaults={"signed": False, "field_name": field_name},
                 )
 
@@ -199,10 +199,10 @@ class SaveSignaturesView(LoginRequiredMixin, View):
                 saved_fields.append({
                     "id": signature_field.id,
                     "user": assigned_user.username,
-                    "x": signature_field.x,
-                    "y": signature_field.y,
-                    "width": signature_field.width,
-                    "height": signature_field.height,
+                    "x_pdf": signature_field.x_pdf,
+                    "y_pdf": signature_field.y_pdf,
+                    "width_pdf": signature_field.width_pdf,
+                    "height_pdf": signature_field.height_pdf,
                     "page": signature_field.page,
                     "field_name": field_name,
                     "created": created,
@@ -233,7 +233,7 @@ class SignDocumentView(LoginRequiredMixin, View):
             document.update_signed_document(latest_document)
 
         # Convert QuerySet -> JSON for the template
-        signature_fields_data = list(signature_fields.values("id", "x", "y", "page"))
+        signature_fields_data = list(signature_fields.values("id", "x_pdf", "y_pdf", "width_pdf", "height_pdf", "page"))
         return render(
             request,
             "documents/sign_document.html",
@@ -273,8 +273,8 @@ class SignDocumentView(LoginRequiredMixin, View):
                     img = Image.open(signature_path)
                     img_width, img_height = img.size
 
-                    max_width = field.width
-                    max_height = field.height
+                    max_width = field.width_pdf
+                    max_height = field.height_pdf
 
                     scale_factor = min(max_width / img_width, max_height / img_height) if img_width and img_height else 1
                     scaled_width = int(img_width * scale_factor)
@@ -289,7 +289,7 @@ class SignDocumentView(LoginRequiredMixin, View):
 
                     # 2. Add image to the PDF page (Corrected insert_image call)
                     page = doc[field.page - 1]
-                    rect = fitz.Rect(field.x, field.y, field.x + scaled_width, field.y + scaled_height)
+                    rect = fitz.Rect(field.x_pdf, field.y_pdf, field.x_pdf + scaled_width, field.y_pdf + scaled_height)
 
                     try:
                         page.insert_image(rect, stream=img_bytes)  # Correct call for 1.25.3
@@ -321,7 +321,7 @@ class SignDocumentView(LoginRequiredMixin, View):
             qr_dir_path = os.path.join(settings.MEDIA_ROOT, f"qr")
             base_name = f"{settings.SITE_URL}{document.file.url}"
             os.makedirs(qr_dir_path, exist_ok=True)
-            qr_path = f"{qr_dir_path}/{base_name}.jpg"
+            qr_path = f"{qr_dir_path}/{document.file.name.split('/')[-1].split('.')[0]}.jpg"
             generate_qr_code(base_name, qr_path)
             stamp_pdf_with_qr(qr_path, signed_pdf_path, pdf_path)
             document.signed = True

@@ -92,10 +92,10 @@ class SignatureField(models.Model):
         on_delete=models.CASCADE,
         related_name="assigned_signatures"
     )
-    x = models.FloatField()
-    y = models.FloatField()
-    width = models.FloatField()
-    height = models.FloatField()
+    x_pdf = models.FloatField()
+    y_pdf = models.FloatField()
+    width_pdf = models.FloatField()
+    height_pdf = models.FloatField()
     page = models.IntegerField()
     field_name = models.CharField(max_length=255, unique=True)
     signed = models.BooleanField(default=False)
