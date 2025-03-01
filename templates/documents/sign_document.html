@@ -147,6 +147,7 @@
     .then(result => {
       if (result.status === "Signed successfully") {
         alert("Document fully signed!");
+        window.location.href = '/documents/to_sign';
       } else {
         alert("Error: " + JSON.stringify(result));
       }

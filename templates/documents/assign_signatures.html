@@ -183,6 +183,7 @@
     .then(data => {
       alert(data.status);
       signatureFields = [];
+      window.location.href = '/documents/';
     })
     .catch(err => console.error("Error saving signatures:", err));
   });
