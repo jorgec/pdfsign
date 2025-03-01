@@ -14,6 +14,7 @@ from django.http.response import HttpResponseRedirect
 from django.shortcuts import redirect
 from django.shortcuts import render, get_object_or_404
 from django.urls.base import reverse
+from django.utils.crypto import get_random_string
 from django.views import View
 from django.views.generic import ListView
 from django.views.generic.base import TemplateView
@@ -42,27 +43,38 @@ class UploadDocumentView(LoginRequiredMixin, FormView):
     form_class = DocumentUploadForm
 
     def form_valid(self, form):
-        # 1. Save the Document with the uploaded file
+        # Grab the file from the form
+        uploaded_file = form.cleaned_data['file']
+
+        # Generate an 8-character random string
+        random_str = get_random_string(8)
+
+        # Split the original filename to avoid double extensions
+        base, ext = os.path.splitext(uploaded_file.name)
+
+        # Create your new name
+        new_filename = f"{random_str}_{base}{ext}"
+
+        # Assign the new name to the uploaded file
+        uploaded_file.name = new_filename
+
+        # Save the Document with the new file name
         document = form.save(commit=False)
         document.owner = self.request.user
-        document.save()  # Now the file is on disk
+        document.save()  # now the file gets saved with the new name
 
-        # 2. Get the path of the uploaded PDF
+        # Remove hybrid xrefs on the newly saved file
         pdf_path = document.file.path
         remove_hybrid_xrefs(pdf_path, pdf_path)
 
-        # 3. Re-save the PDF with pikepdf to remove hybrid xrefs
-        #    or other incompatible features
+        # Re-save to strip out any incompatible features
         try:
             with Pdf.open(pdf_path, allow_overwriting_input=True) as pdf:
-                # Overwrites the same file in place
                 pdf.save(pdf_path)
         except Exception as e:
-            # Optionally handle errors if pikepdf fails
-            # e.g. corrupt PDF, permission errors, etc.
             print(f"Error rewriting PDF with pikepdf: {e}")
 
-        # 4. Redirect to "assign_signatures"
+        # Redirect
         return redirect("assign_signatures", pk=document.pk)
 
 
